@@ -73,8 +73,6 @@ CREATE TABLE Datos.Membresia (
 );
 GO
 
---REHACER FACTURA
-
 CREATE TABLE Datos.MedioDePago (
     IdTipoPago INT NOT NULL PRIMARY KEY,
     IdFuentePago INT NOT NULL PRIMARY KEY,
@@ -101,25 +99,61 @@ CREATE TABLE Datos.UsuarioCuotasPagas (
 	FOREIGN KEY (Contrasenia) REFERENCES Datos.Usuario(Contrasenia)
 );
 
-CREATE TABLE Datos.Cobro (
-    ID_Factura INT NOT NULL,
-    CUIT CHAR(11) NOT NULL,
-    FechaHora DATETIME NOT NULL,
-    Costo DECIMAL(10, 2) NOT NULL,
-    PRIMARY KEY (ID_Factura, CUIT, FechaHora),
-    FOREIGN KEY (ID_Factura, CUIT, FechaHora) 
-        REFERENCES Facturacion.Factura(ID_Factura, CUIT, FechaHora)
+CREATE TABLE Facturacion.Factura (
+	ID_Factura INT IDENTITY(1,1) NOT NULL,
+	CUIT CHAR(11) NOT NULL,
+	FechaHora DATETIME NOT NULL DEFAULT GETDATE(),
+	FechaPagoAutomatico DATE,
+	DNI INT,
+	Nombre NVARCHAR(100),
+    Apellido NVARCHAR(100),
+	Domicilio NVARCHAR(200),
+	Vencimiento_1 AS DATEADD(MONTH, 1, FechaHora) PERSISTED,
+	Vencimiento_2 AS DATEADD(MONTH, 2, FechaHora) PERSISTED,
+	ID_membresia INT,
+	ID_mediodepago INT,
+	Activo BIT DEFAULT 0,
+	Descuento DECIMAL(10,2) DEFAULT 0,
+	Costo DECIMAL(10,2) DEFAULT 0,
+	CONSTRAINT PK_Factura PRIMARY KEY (ID_Factura, CUIT, FechaHora)
 );
+GO
 
-CREATE TABLE Datos.Reembolso (
+CREATE TABLE Facturacion.FacturaActividades (
+	ID_Factura INT NOT NULL,
+	CUIT CHAR(11) NOT NULL,
+	FechaHora DATETIME NOT NULL,
+	ID_Tipo INT NOT NULL,
+	PRIMARY KEY (ID_Factura, CUIT, FechaHora, ID_Tipo),
+	FOREIGN KEY (ID_Factura, CUIT, FechaHora)
+		REFERENCES Facturacion.Factura(ID_Factura, CUIT, FechaHora)
+);
+GO
+
+	
+CREATE TABLE Facturacion.Cobro (
     ID_Factura INT NOT NULL,
     CUIT CHAR(11) NOT NULL,
     FechaHora DATETIME NOT NULL,
     Costo DECIMAL(10, 2) NOT NULL,
+	Activo BIT DEFAULT 1, --1 efectuado, 0 anulado
     PRIMARY KEY (ID_Factura, CUIT, FechaHora),
     FOREIGN KEY (ID_Factura, CUIT, FechaHora) 
         REFERENCES Facturacion.Factura(ID_Factura, CUIT, FechaHora)
 );
+GO
+
+CREATE TABLE Facturacion.Reembolso (
+    ID_Factura INT NOT NULL,
+    CUIT CHAR(11) NOT NULL,
+    FechaHora DATETIME NOT NULL,
+    Costo DECIMAL(10, 2) NOT NULL,
+	Activo BIT DEFAULT 1, --1 efectuado, 0 anulado
+    PRIMARY KEY (ID_Factura, CUIT, FechaHora),
+    FOREIGN KEY (ID_Factura, CUIT, FechaHora) 
+        REFERENCES Facturacion.Factura(ID_Factura, CUIT, FechaHora)
+);
+GO
 
 
 --REHACER OPERACIONES SOCIO
@@ -199,6 +233,89 @@ GO
 
 
 --REHACER OPERACIONS FACTURA
+CREATE PROCEDURE Operaciones.CrearFactura
+	@CUIT CHAR(11),
+	@DNI INT = NULL,
+	@Nombre NVARCHAR(100) = NULL,
+	@Apellido NVARCHAR(100) = NULL,
+	@Domicilio NVARCHAR(200) = NULL,
+	@ID_membresia INT = NULL,
+	@ID_mediodepago INT = NULL,
+	@ActividadesJSON NVARCHAR(MAX) = NULL  -- Ej: '[{"ID_Tipo": 1}, {"ID_Tipo": 2}]'
+AS
+BEGIN
+	DECLARE @FechaHora DATETIME = GETDATE();
+
+	INSERT INTO Facturacion.Factura (
+		CUIT, FechaHora, DNI, Nombre, Apellido, Domicilio,
+		ID_membresia, ID_mediodepago, Activo
+	)
+	VALUES (
+		@CUIT, @FechaHora, @DNI, @Nombre, @Apellido, @Domicilio,
+		@ID_membresia, @ID_mediodepago, @Activo
+	);
+
+	DECLARE @ID_Factura INT = SCOPE_IDENTITY();
+
+	IF @ActividadesJSON IS NOT NULL
+	BEGIN
+		INSERT INTO Facturacion.FacturaActividades (ID_Factura, CUIT, FechaHora, ID_Tipo)
+		SELECT 
+			@ID_Factura, @CUIT, @FechaHora, JSON_VALUE(value, '$.ID_Tipo') --va leyendo cada campo {} y los introduce como actvidades indiciduales
+		FROM OPENJSON(@ActividadesJSON);
+	END
+END;
+GO
+
+CREATE PROCEDURE Operaciones.EfectuarCobro
+	@ID INT
+AS
+BEGIN
+	DECLARE 
+        @CUIT CHAR(11),
+        @FechaFactura DATETIME,
+        @Costo DECIMAL(10,2);
+
+	SELECT @CUIT = CUIT, @FechaFactura = FechaHora, @Costo = Costo
+	FROM Facturacion.Factura
+	WHERE ID_Factura = @ID_Factura;
+	
+	INSERT INTO Facturacion.Cobro (ID_Factura, CUIT, FechaHora, Costo, Activo)
+    VALUES (@ID_Factura, @CUIT, @FechaFactura, @Costo, 1);
+
+    UPDATE Facturacion.Factura
+    SET Activo = 1
+    WHERE ID_Factura = @ID_Factura;
+END
+
+CREATE PROCEDURE Operaciones.EfectuarReembolso
+	@ID INT
+AS
+BEGIN
+	DECLARE 
+        @CUIT CHAR(11),
+        @FechaFactura DATETIME,
+        @Costo DECIMAL(10,2);
+
+	SELECT @CUIT = CUIT, @FechaFactura = FechaHora, @Costo = Costo
+	FROM Facturacion.Factura
+	WHERE ID_Factura = @ID_Factura;
+	
+	INSERT INTO Facturacion.Reembolso (ID_Factura, CUIT, FechaHora, Costo, Activo)
+    VALUES (@ID_Factura, @CUIT, @FechaFactura, @Costo, 1);
+
+    UPDATE Facturacion.Factura
+    SET Activo = 1
+    WHERE ID_Factura = @ID_Factura;
+END
+
+CREATE PROCEDURE Operaciones.AnularFactura
+	@ID INT
+AS
+BEGIN
+END
+
+
 
 --REHACER OPETACIONES USUARIO
 
